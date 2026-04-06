@@ -13,7 +13,6 @@
 --   * CURVE_TYPE derivation logic (applied at transform time;
 --     validator re-applies as fallback and rejects if still NULL):
 --       FORECAST_TYPE IN ('ACTUALS','ACTUAL')      → 'ACTUAL'
---       BUDGET_VERSION LIKE 'BUD%'                 → 'BUDGET'
 --       FORECAST_TYPE IN ('FC','FORECAST')         → 'FORECAST'
 --       CURVE_TYPE column IS NOT NULL in source    → UPPER(CURVE_TYPE)
 --       Otherwise                                  → NULL (will be rejected)
@@ -58,7 +57,7 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
         -- STAGE 1: Populate STG_COST
         -- Deduplication: latest REPORTING_DATE per COST_ID.
         -- Hash covers: PROJECT_ID, COST_CENTER, COST_TYPE,
-        --              COST_CATEGORY, CURRENCY, BUDGET_VERSION
+        --              COST_CATEGORY, CURRENCY
         -- --------------------------------------------------------
         v_step_id := GPC_DM.PKG_ETL_LOGGER.log_step(
             p_run_id, 'TRANSFORM:STG_COST', 'RUNNING');
@@ -73,7 +72,6 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
             COST_TYPE,
             COST_CATEGORY,
             CURRENCY,
-            BUDGET_VERSION,
             REPORTING_DATE
         )
         SELECT
@@ -84,8 +82,7 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
                 COALESCE(COST_CENTER,   'NULL') || CHR(1) ||
                 COALESCE(COST_TYPE,     'NULL') || CHR(1) ||
                 COALESCE(COST_CATEGORY, 'NULL') || CHR(1) ||
-                COALESCE(CURRENCY,      'NULL') || CHR(1) ||
-                COALESCE(BUDGET_VERSION,'NULL'),
+                COALESCE(CURRENCY,      'NULL'),
                 'SHA256'
             ),
             COST_ID,
@@ -94,7 +91,6 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
             COST_TYPE,
             COST_CATEGORY,
             CURRENCY,
-            BUDGET_VERSION,
             REPORTING_DATE
         FROM (
             SELECT
@@ -104,7 +100,6 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
                 COST_TYPE,
                 COST_CATEGORY,
                 CURRENCY,
-                BUDGET_VERSION,
                 REPORTING_DATE,
                 ROW_NUMBER() OVER (
                     PARTITION BY COST_ID
@@ -130,10 +125,9 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
         -- Deduplication: latest REPORTING_DATE per COST_ID + period month.
         -- CURVE_TYPE derivation rule:
         --   1. FORECAST_TYPE = 'ACTUALS' or 'ACTUAL' → 'ACTUAL'
-        --   2. BUDGET_VERSION starts with 'BUD'       → 'BUDGET'
-        --   3. FORECAST_TYPE = 'FC' or 'FORECAST'     → 'FORECAST'
-        --   4. Source CURVE_TYPE column not null       → UPPER(CURVE_TYPE)
-        --   5. Otherwise                               → NULL (rejected)
+        --   2. FORECAST_TYPE = 'FC' or 'FORECAST'     → 'FORECAST'
+        --   3. Source CURVE_TYPE column not null       → UPPER(CURVE_TYPE)
+        --   4. Otherwise                               → NULL (rejected)
         -- Hash covers: PERIOD_DATE, AMOUNT, FORECAST_TYPE
         -- --------------------------------------------------------
         v_step_id := GPC_DM.PKG_ETL_LOGGER.log_step(
@@ -167,7 +161,6 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
             -- CURVE_TYPE derivation (ordered by specificity)
             CASE
                 WHEN UPPER(FORECAST_TYPE) IN ('ACTUALS', 'ACTUAL')      THEN 'ACTUAL'
-                WHEN BUDGET_VERSION       LIKE 'BUD%'                   THEN 'BUDGET'
                 WHEN UPPER(FORECAST_TYPE) IN ('FC', 'FORECAST')         THEN 'FORECAST'
                 WHEN CURVE_TYPE           IS NOT NULL                   THEN UPPER(CURVE_TYPE)
                 ELSE NULL  -- validator will reject this row
@@ -181,7 +174,6 @@ CREATE OR REPLACE PACKAGE BODY GPC_DM.PKG_ETL_TRANSFORM_COST AS
                 AMOUNT,
                 CURVE_TYPE,
                 FORECAST_TYPE,
-                BUDGET_VERSION,
                 REPORTING_DATE,
                 ROW_NUMBER() OVER (
                     PARTITION BY COST_ID, TRUNC(PERIOD_DATE, 'MM')

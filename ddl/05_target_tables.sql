@@ -86,7 +86,7 @@ COMMENT ON COLUMN GPC_DM.DIM_STAFFING_TIMELINE.RECORD_HASH   IS 'SHA-256 hash ov
 -- DIM_COST  (SCD2)
 -- Business key : COST_ID
 -- Tracked attrs: PROJECT_ID, COST_CENTER, COST_TYPE,
---                COST_CATEGORY, CURRENCY, BUDGET_VERSION
+--                COST_CATEGORY, CURRENCY
 -- ----------------------------------------------------------------
 CREATE TABLE GPC_DM.DIM_COST (
     DIM_COST_ID           NUMBER         NOT NULL,
@@ -98,7 +98,6 @@ CREATE TABLE GPC_DM.DIM_COST (
     COST_TYPE             VARCHAR2(50),
     COST_CATEGORY         VARCHAR2(50),
     CURRENCY              VARCHAR2(10),
-    BUDGET_VERSION        VARCHAR2(50),
     -- SCD2 control columns
     EFFECTIVE_START_DATE  DATE           NOT NULL,
     EFFECTIVE_END_DATE    DATE           DEFAULT DATE '9999-12-31' NOT NULL,

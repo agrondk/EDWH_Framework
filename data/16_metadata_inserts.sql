@@ -326,9 +326,6 @@ BEGIN
     INSERT INTO GPC_DM.ETL_COLUMN_MAPPING
         (MAPPING_ID, SOURCE_COLUMN,   TARGET_COLUMN,   IS_BUSINESS_KEY, IS_TRACKED, COLUMN_ORDER)
     VALUES (v_mid1, 'CURRENCY',       'CURRENCY',       'N', 'Y', 60);
-    INSERT INTO GPC_DM.ETL_COLUMN_MAPPING
-        (MAPPING_ID, SOURCE_COLUMN,   TARGET_COLUMN,   IS_BUSINESS_KEY, IS_TRACKED, COLUMN_ORDER)
-    VALUES (v_mid1, 'BUDGET_VERSION', 'BUDGET_VERSION', 'N', 'Y', 70);
 
     -- --------------------------------------------------------
     -- Validation rules for DIM_COST
@@ -407,7 +404,6 @@ BEGIN
         'CURVE_TYPE',
         'CASE'
         || ' WHEN UPPER(FORECAST_TYPE) IN (''ACTUALS'',''ACTUAL'') THEN ''ACTUAL'''
-        || ' WHEN BUDGET_VERSION LIKE ''BUD%''                     THEN ''BUDGET'''
         || ' WHEN UPPER(FORECAST_TYPE) IN (''FC'',''FORECAST'')    THEN ''FORECAST'''
         || ' ELSE NULL END',
         'REJECT'
