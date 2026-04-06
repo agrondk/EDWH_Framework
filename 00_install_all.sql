@@ -45,9 +45,15 @@ PROMPT =============================================================
 @@ddl/04_logging_tables.sql
 
 PROMPT =============================================================
-PROMPT  STEP 5 — Target Dimension Tables
+PROMPT  STEP 5 — Target Dimension Tables (In Case new Target table is Onboarded)
 PROMPT =============================================================
-@@ddl/05_target_tables.sql
+-- @@ddl/05_target_tables.sql
+
+PROMPT =============================================================
+PROMPT  STEP 5b — Migrate existing Target Tables (add missing columns)
+PROMPT  Safe to run even when tables already exist — checks ALL_TAB_COLUMNS first
+PROMPT =============================================================
+@@ddl/00_migrate_target_tables.sql
 
 PROMPT =============================================================
 PROMPT  STEP 6 — Staging Tables
