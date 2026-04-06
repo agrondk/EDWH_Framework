@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    IICS Cloud Data Integration — Taskflow Definition
+    ──────────────────────────────────────────────────
+    Name        : TF_GPC_DM_ETL_DAILY_RUN
+    Description : Orchestrates the GPC_DM EDWH ETL pipeline.
+                  Calls Oracle stored procedures for STAFFING_SCHEDULE and COST,
+                  reads ETL log tables for run summary and errors, and sends
+                  email notification on success or failure.
+
+    Import via  : IICS Designer → New → Import (ZIP this XML first)
+    Connection  : Oracle_GPC_DM (see connections/Oracle_GPC_DM_Connection.xml)
+
+    Task execution order:
+      [Start]
+         │
+         ▼
+      T1_PRE_CHECK          → Verify entities are IDLE/FAILED (runnable)
+         │
+         ▼
+      T2_RUN_STAFFING       → EXEC PKG_ETL_ORCHESTRATOR.run_entity('STAFFING_SCHEDULE')
+         │ success │ failure
+         │         └──────────────────────────────────────┐
+         ▼                                                 │
+      T3_RUN_COST            → EXEC PKG_ETL_ORCHESTRATOR.run_entity('COST')  │
+         │ success │ failure                               │
+         │         └──────────────┐                       │
+         ▼                        │                       │
+      T4_CAPTURE_RUN_LOG    → SELECT from V_IICS_RUN_SUMMARY        │
+         │                        │                       │
+         ▼                        │                       │
+      T5_CAPTURE_ERRORS     → SELECT from V_IICS_ERROR_SUMMARY      │
+         │                        │                       │
+         ▼                        ▼                       ▼
+      T6_DECISION ──errors=0──► T7_EMAIL_SUCCESS          │
+                  └──errors>0──► T8_EMAIL_FAILURE ◄───────┘
+         │                        │
+         ▼                        ▼
+      [End — Success]        [End — Failed]
+-->
+<INFATASKFLOW
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    VERSION="1.0">
+
+    <TASKFLOW
+        NAME        = "TF_GPC_DM_ETL_DAILY_RUN"
+        DESCRIPTION = "Daily ETL run for GPC_DM EDWH — STAFFING_SCHEDULE and COST entities"
+        FOLDER      = "/ETL/GPC_DM"
+        IS_VALID    = "YES">
+
+        <!-- ════════════════════════════════════════════════════════════
+             TASKFLOW VARIABLES
+             Populated by SQL tasks; used in decision and email steps.
+        ════════════════════════════════════════════════════════════ -->
+        <VARIABLES>
+
+            <VARIABLE NAME="$$v_run_date"
+                       TYPE    = "STRING"
+                       DEFAULT = ""
+                       DESCRIPTION="SYSDATE of this run, set by T4_CAPTURE_RUN_LOG"/>
+
+            <VARIABLE NAME="$$v_staffing_run_id"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"
+                       DESCRIPTION="RUN_ID of the STAFFING_SCHEDULE entity-level run"/>
+
+            <VARIABLE NAME="$$v_cost_run_id"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"
+                       DESCRIPTION="RUN_ID of the COST entity-level run"/>
+
+            <VARIABLE NAME="$$v_staffing_status"
+                       TYPE    = "STRING"
+                       DEFAULT = "UNKNOWN"/>
+
+            <VARIABLE NAME="$$v_cost_status"
+                       TYPE    = "STRING"
+                       DEFAULT = "UNKNOWN"/>
+
+            <VARIABLE NAME="$$v_staffing_rows_inserted"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"/>
+
+            <VARIABLE NAME="$$v_staffing_rows_rejected"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"/>
+
+            <VARIABLE NAME="$$v_cost_rows_inserted"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"/>
+
+            <VARIABLE NAME="$$v_cost_rows_rejected"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"/>
+
+            <VARIABLE NAME="$$v_error_count"
+                       TYPE    = "INTEGER"
+                       DEFAULT = "0"
+                       DESCRIPTION="Total errors in ETL_ERROR_LOG for this run pair.
+                                    Drives the success/failure decision branch."/>
+
+            <VARIABLE NAME="$$v_error_summary"
+                       TYPE    = "STRING"
+                       DEFAULT = ""
+                       DESCRIPTION="Concatenated error messages for email body"/>
+
+            <VARIABLE NAME="$$v_failed_entity"
+                       TYPE    = "STRING"
+                       DEFAULT = ""
+                       DESCRIPTION="Set to entity name if the procedure raises an exception"/>
+
+        </VARIABLES>
+
+
+        <!-- ════════════════════════════════════════════════════════════
+             TASKS
+        ════════════════════════════════════════════════════════════ -->
+        <TASKS>
+
+            <!-- ──────────────────────────────────────────────────────
+                 T1 — PRE-CHECK
+                 Confirms both entities are in a runnable state.
+                 Writes 'SKIP' warning into $$v_failed_entity if
+                 an entity is RUNNING or DISABLED.
+            ────────────────────────────────────────────────────── -->
+            <SQLTASK
+                ID          = "T1_PRE_CHECK"
+                NAME        = "T1_PRE_CHECK"
+                DESCRIPTION = "Verify both entities are IDLE or FAILED before running"
+                CONNECTION  = "Oracle_GPC_DM"
+                SQL_FILE    = "../sql/01_pre_check.sql"
+                ON_SUCCESS  = "T2_RUN_STAFFING"
+                ON_FAILURE  = "T8_EMAIL_FAILURE">
+
+                <!-- Output parameter: rowcount of entities that are NOT runnable -->
+                <OUTPUTPARAM NAME="$$v_blocked_count" COLUMN="BLOCKED_COUNT" TYPE="INTEGER"/>
+
+            </SQLTASK>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T2 — RUN STAFFING_SCHEDULE
+                 Calls the Oracle ETL procedure for staffing data.
+                 Oracle handles: extract, transform, validate, SCD2 load.
+            ────────────────────────────────────────────────────── -->
+            <SQLTASK
+                ID          = "T2_RUN_STAFFING"
+                NAME        = "T2_RUN_STAFFING"
+                DESCRIPTION = "Execute PKG_ETL_ORCHESTRATOR.run_entity for STAFFING_SCHEDULE"
+                CONNECTION  = "Oracle_GPC_DM"
+                SQL_FILE    = "../sql/02_run_staffing_schedule.sql"
+                ON_SUCCESS  = "T3_RUN_COST"
+                ON_FAILURE  = "T5_CAPTURE_ERRORS">
+
+                <!-- If procedure raises ORA- exception, IICS marks task FAILED.
+                     ON_FAILURE still reads error log before sending notification. -->
+
+            </SQLTASK>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T3 — RUN COST
+                 Calls the Oracle ETL procedure for cost data.
+            ────────────────────────────────────────────────────── -->
+            <SQLTASK
+                ID          = "T3_RUN_COST"
+                NAME        = "T3_RUN_COST"
+                DESCRIPTION = "Execute PKG_ETL_ORCHESTRATOR.run_entity for COST"
+                CONNECTION  = "Oracle_GPC_DM"
+                SQL_FILE    = "../sql/03_run_cost.sql"
+                ON_SUCCESS  = "T4_CAPTURE_RUN_LOG"
+                ON_FAILURE  = "T5_CAPTURE_ERRORS">
+
+            </SQLTASK>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T4 — CAPTURE RUN LOG
+                 Reads V_IICS_RUN_SUMMARY (Oracle view over ETL_RUN_LOG)
+                 and populates taskflow variables with row counts and status.
+            ────────────────────────────────────────────────────── -->
+            <SQLTASK
+                ID          = "T4_CAPTURE_RUN_LOG"
+                NAME        = "T4_CAPTURE_RUN_LOG"
+                DESCRIPTION = "Read ETL_RUN_LOG via V_IICS_RUN_SUMMARY; populate run variables"
+                CONNECTION  = "Oracle_GPC_DM"
+                SQL_FILE    = "../sql/04_capture_run_log.sql"
+                ON_SUCCESS  = "T5_CAPTURE_ERRORS"
+                ON_FAILURE  = "T5_CAPTURE_ERRORS">
+
+                <OUTPUTPARAM NAME="$$v_run_date"               COLUMN="RUN_DATE"               TYPE="STRING"/>
+                <OUTPUTPARAM NAME="$$v_staffing_run_id"        COLUMN="STAFFING_RUN_ID"        TYPE="INTEGER"/>
+                <OUTPUTPARAM NAME="$$v_cost_run_id"            COLUMN="COST_RUN_ID"            TYPE="INTEGER"/>
+                <OUTPUTPARAM NAME="$$v_staffing_status"        COLUMN="STAFFING_STATUS"        TYPE="STRING"/>
+                <OUTPUTPARAM NAME="$$v_cost_status"            COLUMN="COST_STATUS"            TYPE="STRING"/>
+                <OUTPUTPARAM NAME="$$v_staffing_rows_inserted" COLUMN="STAFFING_ROWS_INSERTED" TYPE="INTEGER"/>
+                <OUTPUTPARAM NAME="$$v_staffing_rows_rejected" COLUMN="STAFFING_ROWS_REJECTED" TYPE="INTEGER"/>
+                <OUTPUTPARAM NAME="$$v_cost_rows_inserted"     COLUMN="COST_ROWS_INSERTED"     TYPE="INTEGER"/>
+                <OUTPUTPARAM NAME="$$v_cost_rows_rejected"     COLUMN="COST_ROWS_REJECTED"     TYPE="INTEGER"/>
+
+            </SQLTASK>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T5 — CAPTURE ERRORS
+                 Reads V_IICS_ERROR_SUMMARY (Oracle view over ETL_ERROR_LOG)
+                 for any errors from today's runs.
+                 Always runs — reached from both success and failure paths.
+            ────────────────────────────────────────────────────── -->
+            <SQLTASK
+                ID          = "T5_CAPTURE_ERRORS"
+                NAME        = "T5_CAPTURE_ERRORS"
+                DESCRIPTION = "Read ETL_ERROR_LOG via V_IICS_ERROR_SUMMARY; count and summarise errors"
+                CONNECTION  = "Oracle_GPC_DM"
+                SQL_FILE    = "../sql/05_capture_error_log.sql"
+                ON_SUCCESS  = "T6_DECISION"
+                ON_FAILURE  = "T8_EMAIL_FAILURE">
+
+                <OUTPUTPARAM NAME="$$v_error_count"   COLUMN="ERROR_COUNT"   TYPE="INTEGER"/>
+                <OUTPUTPARAM NAME="$$v_error_summary" COLUMN="ERROR_SUMMARY" TYPE="STRING"/>
+
+            </SQLTASK>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T6 — DECISION: Any errors?
+                 Branches on $$v_error_count > 0
+            ────────────────────────────────────────────────────── -->
+            <DECISION
+                ID          = "T6_DECISION"
+                NAME        = "T6_DECISION"
+                DESCRIPTION = "Branch: success if no errors, failure if errors exist">
+
+                <CONDITION
+                    EXPRESSION  = "$$v_error_count = 0"
+                    ON_TRUE     = "T7_EMAIL_SUCCESS"
+                    ON_FALSE    = "T8_EMAIL_FAILURE"/>
+
+            </DECISION>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T7 — EMAIL SUCCESS
+                 Sends run summary to the team on clean completion.
+            ────────────────────────────────────────────────────── -->
+            <EMAILTASK
+                ID          = "T7_EMAIL_SUCCESS"
+                NAME        = "T7_EMAIL_SUCCESS"
+                DESCRIPTION = "Notify team — ETL run completed successfully"
+                ON_SUCCESS  = "END_SUCCESS"
+                ON_FAILURE  = "END_SUCCESS">
+
+                <TO>agron.daka@aralytiks.cm; dren.sahiti@aralytiks.cm; elion.rrahmani@aralytiks.cm</TO>
+                <SUBJECT>[GPC_DM ETL] SUCCESS — Daily Run completed $$v_run_date</SUBJECT>
+                <BODY><![CDATA[
+GPC_DM EDWH Daily ETL Run — COMPLETED SUCCESSFULLY
+===================================================
+Run Date : $$v_run_date
+
+STAFFING_SCHEDULE
+  Status          : $$v_staffing_status
+  Run ID          : $$v_staffing_run_id
+  Rows Inserted   : $$v_staffing_rows_inserted
+  Rows Rejected   : $$v_staffing_rows_rejected
+
+COST
+  Status          : $$v_cost_status
+  Run ID          : $$v_cost_run_id
+  Rows Inserted   : $$v_cost_rows_inserted
+  Rows Rejected   : $$v_cost_rows_rejected
+
+Review full detail:
+  SELECT * FROM GPC_DM.V_ETL_RUN_SUMMARY WHERE ROWNUM <= 10;
+  SELECT * FROM GPC_DM.ETL_STEP_LOG WHERE RUN_ID IN ($$v_staffing_run_id, $$v_cost_run_id) ORDER BY STEP_ID;
+                ]]></BODY>
+
+            </EMAILTASK>
+
+
+            <!-- ──────────────────────────────────────────────────────
+                 T8 — EMAIL FAILURE
+                 Sends error details to the team on any failure path.
+                 Reached from: T1 failure, T2 failure, T3 failure,
+                               T5 failure, T6 false-branch.
+            ────────────────────────────────────────────────────── -->
+            <EMAILTASK
+                ID          = "T8_EMAIL_FAILURE"
+                NAME        = "T8_EMAIL_FAILURE"
+                DESCRIPTION = "Notify team — ETL run failed or has errors"
+                ON_SUCCESS  = "END_FAILED"
+                ON_FAILURE  = "END_FAILED">
+
+                <TO>agron.daka@aralytiks.cm; dren.sahiti@aralytiks.cm; elion.rrahmani@aralytiks.cm</TO>
+                <SUBJECT>[GPC_DM ETL] VALIDATION FAILURE — Daily Run $$v_run_date requires attention</SUBJECT>
+                <BODY><![CDATA[
+GPC_DM EDWH Daily ETL Run — FAILED OR ERRORS DETECTED
+======================================================
+Run Date     : $$v_run_date
+Error Count  : $$v_error_count
+
+STAFFING_SCHEDULE
+  Status          : $$v_staffing_status
+  Run ID          : $$v_staffing_run_id
+  Rows Rejected   : $$v_staffing_rows_rejected
+
+COST
+  Status          : $$v_cost_status
+  Run ID          : $$v_cost_run_id
+  Rows Rejected   : $$v_cost_rows_rejected
+
+Error Summary:
+$$v_error_summary
+
+--- Diagnostic Queries ---
+
+-- Full error log:
+SELECT ENTITY_NAME, TARGET_TABLE, ERROR_CODE, ERROR_MESSAGE, ERROR_TIME
+FROM   GPC_DM.ETL_ERROR_LOG
+WHERE  ERROR_TIME >= TRUNC(SYSDATE)
+ORDER  BY ERROR_TIME;
+
+-- Rejected rows (Staffing):
+SELECT SCHEDULE_ID, STG_REJECT_REASON
+FROM   GPC_DM.STG_STAFFING_SCHEDULE
+WHERE  STG_STATUS = 'REJECTED'
+AND    STG_RUN_ID = $$v_staffing_run_id;
+
+-- Rejected rows (Cost):
+SELECT COST_ID, STG_REJECT_REASON
+FROM   GPC_DM.STG_COST
+WHERE  STG_STATUS  = 'REJECTED'
+AND    STG_RUN_ID  = $$v_cost_run_id;
+
+-- Reset entity if stuck in RUNNING state:
+-- UPDATE GPC_DM.ETL_CONTROL SET STATUS = 'IDLE' WHERE STATUS = 'RUNNING';
+-- COMMIT;
+                ]]></BODY>
+
+            </EMAILTASK>
+
+        </TASKS>
+
+
+        <!-- ════════════════════════════════════════════════════════════
+             FLOW — Start/End markers
+        ════════════════════════════════════════════════════════════ -->
+        <FLOW>
+            <START NEXT_TASK="T1_PRE_CHECK"/>
+            <END   ID="END_SUCCESS" STATUS="SUCCESS"/>
+            <END   ID="END_FAILED"  STATUS="FAILED"/>
+        </FLOW>
+
+
+        <!-- ════════════════════════════════════════════════════════════
+             SCHEDULE
+             Daily at 02:00 — adjust to match your environment window.
+        ════════════════════════════════════════════════════════════ -->
+        <SCHEDULE
+            ENABLED         = "YES"
+            FREQUENCY       = "DAILY"
+            START_TIME      = "02:00"
+            TIMEZONE        = "UTC"
+            DESCRIPTION     = "Runs daily at 02:00 UTC after source tables are refreshed.
+                               Disable via IICS Scheduler if source refresh is delayed."/>
+
+    </TASKFLOW>
+
+</INFATASKFLOW>

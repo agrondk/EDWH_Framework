@@ -148,3 +148,64 @@ GROUP BY STG_RUN_ID, STG_STATUS, STG_ACTION
 ORDER BY STG_RUN_ID DESC, STAGING_TABLE, STG_STATUS;
 
 COMMENT ON TABLE GPC_DM.V_ETL_STAGING_SUMMARY IS 'Aggregated staging row counts by run, status, and action across all staging tables.';
+
+
+-- ----------------------------------------------------------------
+-- V_IICS_RUN_SUMMARY
+-- Purpose   : Used by IICS taskflow task T4_CAPTURE_RUN_LOG.
+--             Exposes today's run log entries (entity-level and
+--             mapping-level) with row counts for both entities.
+--             IICS reads this view via JDBC to populate taskflow
+--             variables for email notification.
+-- ----------------------------------------------------------------
+CREATE OR REPLACE VIEW GPC_DM.V_IICS_RUN_SUMMARY AS
+SELECT
+    r.RUN_ID,
+    r.MAPPING_ID,
+    e.ENTITY_NAME,
+    t.TARGET_TABLE,
+    r.STATUS,
+    r.START_TIME,
+    r.END_TIME,
+    ROUND((r.END_TIME - r.START_TIME) * 86400, 1) AS ELAPSED_SECS,
+    NVL(r.ROWS_READ,     0)                        AS ROWS_READ,
+    NVL(r.ROWS_INSERTED, 0)                        AS ROWS_INSERTED,
+    NVL(r.ROWS_UPDATED,  0)                        AS ROWS_UPDATED,
+    NVL(r.ROWS_EXPIRED,  0)                        AS ROWS_EXPIRED,
+    NVL(r.ROWS_SKIPPED,  0)                        AS ROWS_SKIPPED,
+    NVL(r.ROWS_REJECTED, 0)                        AS ROWS_REJECTED,
+    r.ERROR_MESSAGE
+FROM   GPC_DM.ETL_RUN_LOG          r
+JOIN   GPC_DM.ETL_ENTITY            e ON e.ENTITY_ID  = r.ENTITY_ID
+LEFT JOIN GPC_DM.ETL_TARGET_MAPPING t ON t.MAPPING_ID = r.MAPPING_ID
+WHERE  TRUNC(r.START_TIME) = TRUNC(SYSDATE)
+AND    e.ENTITY_NAME IN ('STAFFING_SCHEDULE', 'COST')
+ORDER BY r.RUN_ID DESC;
+
+COMMENT ON TABLE GPC_DM.V_IICS_RUN_SUMMARY IS 'IICS-facing view: today''s run log entries for STAFFING_SCHEDULE and COST. Read by IICS task T4_CAPTURE_RUN_LOG.';
+
+
+-- ----------------------------------------------------------------
+-- V_IICS_ERROR_SUMMARY
+-- Purpose   : Used by IICS taskflow task T5_CAPTURE_ERRORS.
+--             Exposes all ETL_ERROR_LOG entries from today's runs
+--             for STAFFING_SCHEDULE and COST.
+--             IICS reads this view to count errors and build the
+--             failure notification email body.
+-- ----------------------------------------------------------------
+CREATE OR REPLACE VIEW GPC_DM.V_IICS_ERROR_SUMMARY AS
+SELECT
+    el.ERR_ID,
+    el.RUN_ID,
+    el.ENTITY_NAME,
+    el.TARGET_TABLE,
+    el.ERROR_CODE,
+    el.ERROR_MESSAGE,
+    el.ERROR_TIME,
+    el.RECORD_KEY
+FROM   GPC_DM.ETL_ERROR_LOG el
+WHERE  TRUNC(el.ERROR_TIME) = TRUNC(SYSDATE)
+AND    el.ENTITY_NAME IN ('STAFFING_SCHEDULE', 'COST')
+ORDER BY el.ERROR_TIME DESC;
+
+COMMENT ON TABLE GPC_DM.V_IICS_ERROR_SUMMARY IS 'IICS-facing view: today''s error log entries for STAFFING_SCHEDULE and COST. Read by IICS task T5_CAPTURE_ERRORS.';

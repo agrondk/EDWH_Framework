@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    IICS Connection Definition — Oracle GPC_DM (JDBC)
+    ─────────────────────────────────────────────────
+    Import via:  IICS Administrator → Connections → Import
+    Or create manually using the field values below.
+
+    Connection type : Oracle
+    Use in          : TF_GPC_DM_ETL_DAILY_RUN taskflow
+-->
+<INFACONNECTION
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    VERSION="1.0">
+
+    <CONNECTION
+        NAME           = "Oracle_GPC_DM"
+        DESCRIPTION    = "Oracle GPC_DM schema — EDWH Framework target and log tables"
+        TYPE           = "JDBC"
+        SUBTYPE        = "Oracle">
+
+        <!-- ── Core JDBC settings ───────────────────────────────────── -->
+        <PROPERTY NAME="jdbcUrl"
+                  VALUE="jdbc:oracle:thin:@//{HOST}:{PORT}/{SERVICE_NAME}"
+                  DESCRIPTION="Replace {HOST}, {PORT}, {SERVICE_NAME} with actual values.
+                               Example: jdbc:oracle:thin:@//oradb01.company.com:1521/GPCPROD"/>
+
+        <PROPERTY NAME="username"
+                  VALUE="GPC_DM"
+                  DESCRIPTION="Schema owner with EXECUTE on all PKG_ETL_* packages
+                               and SELECT on ETL_RUN_LOG, ETL_STEP_LOG, ETL_ERROR_LOG."/>
+
+        <PROPERTY NAME="password"
+                  VALUE="{GPC_DM_PASSWORD}"
+                  DESCRIPTION="Store in IICS secure parameter store — never hardcode."/>
+
+        <PROPERTY NAME="schema"
+                  VALUE="GPC_DM"/>
+
+        <!-- ── JDBC Driver ──────────────────────────────────────────── -->
+        <PROPERTY NAME="jdbcDriverClass"
+                  VALUE="oracle.jdbc.OracleDriver"
+                  DESCRIPTION="ojdbc8.jar or ojdbc11.jar required on the Secure Agent.
+                               Copy to: $INFA_HOME/services/shared/javalib/"/>
+
+        <!-- ── Connection pool ──────────────────────────────────────── -->
+        <PROPERTY NAME="maxPoolSize"        VALUE="10"/>
+        <PROPERTY NAME="minPoolSize"        VALUE="2"/>
+        <PROPERTY NAME="connectionTimeout"  VALUE="30"
+                  DESCRIPTION="Seconds before a new connection attempt times out."/>
+        <PROPERTY NAME="queryTimeout"       VALUE="3600"
+                  DESCRIPTION="Max seconds a single SQL task may run (1 hour).
+                               Increase for initial full loads."/>
+
+        <!-- ── Secure Agent ─────────────────────────────────────────── -->
+        <PROPERTY NAME="runtimeEnvironment"
+                  VALUE="{SECURE_AGENT_GROUP_NAME}"
+                  DESCRIPTION="Name of the Secure Agent group installed in the same
+                               network zone as the Oracle database."/>
+
+    </CONNECTION>
+
+</INFACONNECTION>
