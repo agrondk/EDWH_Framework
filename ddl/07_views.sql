@@ -39,22 +39,12 @@ COMMENT ON TABLE GPC_DM.V_ETL_ACTIVE_ENTITIES IS 'Active entities with mapping d
 -- ----------------------------------------------------------------
 CREATE OR REPLACE VIEW GPC_DM.V_ETL_RUN_SUMMARY AS
 SELECT
-    r.RUN_ID,
+    r.*,
     e.ENTITY_NAME,
     t.TARGET_TABLE,
-    r.START_TIME,
-    r.END_TIME,
-    ROUND((r.END_TIME - r.START_TIME) * 86400, 1)  AS ELAPSED_SECS,
-    r.STATUS,
-    r.ROWS_READ,
-    r.ROWS_INSERTED,
-    r.ROWS_UPDATED,
-    r.ROWS_EXPIRED,
-    r.ROWS_SKIPPED,
-    r.ROWS_REJECTED,
-    r.ERROR_MESSAGE
-FROM   GPC_DM.ETL_RUN_LOG         r
-JOIN   GPC_DM.ETL_ENTITY           e ON e.ENTITY_ID  = r.ENTITY_ID
+    ROUND((r.END_TIME - r.START_TIME) * 86400, 1)  AS ELAPSED_SECS
+FROM   GPC_DM.ETL_RUN_LOG          r
+JOIN   GPC_DM.ETL_ENTITY            e ON e.ENTITY_ID  = r.ENTITY_ID
 LEFT JOIN GPC_DM.ETL_TARGET_MAPPING t ON t.MAPPING_ID = r.MAPPING_ID
 WHERE  r.START_TIME >= SYSDATE - 7
 ORDER BY r.RUN_ID DESC;
@@ -172,14 +162,7 @@ COMMENT ON TABLE GPC_DM.V_IICS_RUN_SUMMARY IS 'IICS-facing view: today''s run lo
 -- ----------------------------------------------------------------
 CREATE OR REPLACE VIEW GPC_DM.V_IICS_ERROR_SUMMARY AS
 SELECT
-    el.ERR_ID,
-    el.RUN_ID,
-    el.ENTITY_NAME,
-    el.TARGET_TABLE,
-    el.ERROR_CODE,
-    el.ERROR_MESSAGE,
-    el.ERROR_TIME,
-    el.RECORD_KEY
+    el.*
 FROM   GPC_DM.ETL_ERROR_LOG el
 WHERE  TRUNC(el.ERROR_TIME) = TRUNC(SYSDATE)
 AND    el.ENTITY_NAME IN ('STAFFING_SCHEDULE', 'COST')
