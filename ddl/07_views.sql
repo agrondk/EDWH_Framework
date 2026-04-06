@@ -68,19 +68,7 @@ COMMENT ON TABLE GPC_DM.V_ETL_RUN_SUMMARY IS 'Run history for the last 7 days wi
 -- ----------------------------------------------------------------
 CREATE OR REPLACE VIEW GPC_DM.V_DIM_STAFFING_CURRENT AS
 SELECT
-    d.DIM_SS_ID,
-    d.SCHEDULE_ID,
-    d.EMPLOYEE_ID,
-    d.POSITION_ID,
-    d.PROJECT_ID,
-    d.SCHEDULE_TYPE,
-    d.SCHEDULE_STATUS,
-    d.SCHEDULE_START_DATE,
-    d.SCHEDULE_END_DATE,
-    d.EFFECTIVE_START_DATE,
-    d.REPORTING_DATE,
-    d.ETL_RUN_ID,
-    d.ETL_LOAD_DATE,
+    d.*,
     r.START_TIME    AS ETL_RUN_START,
     r.STATUS        AS ETL_RUN_STATUS
 FROM   GPC_DM.DIM_STAFFING_SCHEDULE d
@@ -96,17 +84,7 @@ COMMENT ON TABLE GPC_DM.V_DIM_STAFFING_CURRENT IS 'Current version only of DIM_S
 -- ----------------------------------------------------------------
 CREATE OR REPLACE VIEW GPC_DM.V_DIM_COST_CURRENT AS
 SELECT
-    d.DIM_COST_ID,
-    d.COST_ID,
-    d.PROJECT_ID,
-    d.COST_CENTER,
-    d.COST_TYPE,
-    d.COST_CATEGORY,
-    d.CURRENCY,
-    d.EFFECTIVE_START_DATE,
-    d.REPORTING_DATE,
-    d.ETL_RUN_ID,
-    d.ETL_LOAD_DATE,
+    d.*,
     r.START_TIME    AS ETL_RUN_START,
     r.STATUS        AS ETL_RUN_STATUS
 FROM   GPC_DM.DIM_COST           d
