@@ -1,22 +1,33 @@
 -- ============================================================
 -- IICS SQL Task: T2_RUN_STAFFING
--- Purpose : Execute the full ETL pipeline for the
---           STAFFING_SCHEDULE entity.
+-- Purpose : Execute the full ETL load for the STAFFING_SCHEDULE
+--           entity for the given portfolio and reporting date.
 --
 -- Oracle handles internally:
---   1. Incremental extract from KBR_IHUB source table
---   2. Transform and hash into STG_STAFFING_SCHEDULE
---      and STG_STAFFING_TIMELINE
---   3. Validate staging rows (NOT_NULL, DERIVED, CHECK rules)
---   4. SCD2 load into DIM_STAFFING_SCHEDULE
---   5. Incremental MERGE into DIM_STAFFING_TIMELINE
---   6. Advance watermark on success
+--   1. GCS pre-process (stage → merge → GCS_KEY lookup)
+--   2. Invalidate DIM_STAFFING_SCHEDULE rows in scope
+--   3. Insert current DIM_STAFFING_SCHEDULE rows (IS_VALID=1)
+--   4. Invalidate DIM_STAFFING_TIMELINE rows in scope
+--   5. Insert period rows into DIM_STAFFING_TIMELINE
+--      (one row per calendar month via CONNECT BY unpivot)
 --
--- On failure: Oracle raises RAISE_APPLICATION_ERROR.
---             IICS detects the ORA- exception and marks
---             this task FAILED, routing to T5_CAPTURE_ERRORS.
+-- Import modes:
+--   REPLACE_ALL — full reload: invalidate all rows for this
+--                 portfolio + reporting_date before inserting
+--   ADD_UPDATE  — incremental: invalidate only matching
+--                 GCS_KEY + EMPLOYEE_ID + POSITION_NUMBER
+--
+-- On failure: Oracle issues ROLLBACK and raises an exception.
+--             IICS detects the ORA- error, marks this task
+--             FAILED, and routes to T5_CAPTURE_ERRORS.
 -- ============================================================
 
 BEGIN
-    GPC_DM.PKG_ETL_ORCHESTRATOR.run_entity('STAFFING_SCHEDULE');
+    GPC_DM.PKG_STAFFING_LOAD.load(
+        p_portfolio_id     => '$$v_portfolio_id',
+        p_reporting_date   => TO_DATE('$$v_reporting_date', 'YYYY-MM-DD'),
+        p_execution_center => '$$v_execution_center',
+        p_import_mode      => '$$v_import_mode',
+        p_user             => '$$v_user'
+    );
 END;

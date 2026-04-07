@@ -1,6 +1,6 @@
 # Source Tables Setup — STAFFING_SCHEDULE & COST
 
-Quick reference for setting up and running the two source table ETL loads.
+Quick reference for setting up and triggering the two ETL loads.
 
 ---
 
@@ -8,8 +8,12 @@ Quick reference for setting up and running the two source table ETL loads.
 
 | Entity | Source Table | Target Tables |
 |---|---|---|
-| `STAFFING_SCHEDULE` | `KBR_IHUB.APAC_PCDM_STAFFING_SCHEDULE_IHUB` | `DIM_STAFFING_SCHEDULE` (SCD2) + `DIM_STAFFING_TIMELINE` (Incremental) |
-| `COST` | `KBR_IHUB.APAC_PCDM_COST_IHUB` | `DIM_COST` (SCD2) + `DIM_TIMELINE_COST` (Incremental) |
+| `STAFFING_SCHEDULE` | `KBR_IHUB.APAC_PCDM_STAFFING_SCHEDULE_IHUB` | `DIM_STAFFING_SCHEDULE` + `DIM_STAFFING_TIMELINE` |
+| `COST` | `KBR_IHUB.APAC_PCDM_COST_IHUB` | `DIM_COST` |
+
+> **Note:** `DIM_TIMELINE_COST` is out of scope for this framework. Target tables are shared with other
+> processes — the packages write only to columns that already exist. No structural changes are made
+> to target tables.
 
 ---
 
@@ -33,7 +37,7 @@ GRANT SELECT ON KBR_IHUB.APAC_PCDM_COST_IHUB TO GPC_DM;
 
 ## Step 2 — Install the Framework
 
-> Skip this step if the GPC_DM schema is already installed.
+> Skip if the GPC_DM schema is already installed. Run `verify_install.sql` to check.
 
 From the `EDWH_Framework` directory, connect as GPC_DM and run:
 
@@ -41,166 +45,247 @@ From the `EDWH_Framework` directory, connect as GPC_DM and run:
 @00_install_all.sql
 ```
 
-This creates all tables, sequences, packages, and seeds the metadata for both entities in one step.
+Then seed the metadata:
+
+```sql
+@data/16_metadata_inserts.sql
+```
+
+Verify with:
+
+```sql
+@verify_install.sql
+```
 
 ---
 
-## Step 3 — Confirm Both Entities Are Registered
+## Step 3 — Run a STAFFING Load (manual)
+
+`PKG_STAFFING_LOAD.load` takes five parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `p_portfolio_id` | VARCHAR2 | Portfolio identifier (e.g. `'GPC-001'`) |
+| `p_reporting_date` | DATE | Reporting cut-off date |
+| `p_execution_center` | VARCHAR2 | Execution centre code (first 2 chars used) |
+| `p_import_mode` | VARCHAR2 | `REPLACE_ALL` — full reload for this scope; `ADD_UPDATE` — incremental |
+| `p_user` | VARCHAR2 | Calling user / system identifier for audit |
+
+Example — full reload for a portfolio:
 
 ```sql
-SELECT e.ENTITY_NAME, e.SOURCE_TABLE, c.STATUS, c.LAST_WATERMARK
-FROM   GPC_DM.ETL_ENTITY  e
-JOIN   GPC_DM.ETL_CONTROL c ON c.ENTITY_ID = e.ENTITY_ID
-WHERE  e.ENTITY_NAME IN ('STAFFING_SCHEDULE', 'COST');
+BEGIN
+    GPC_DM.PKG_STAFFING_LOAD.load(
+        p_portfolio_id     => 'GPC-001',
+        p_reporting_date   => DATE '2025-03-31',
+        p_execution_center => 'AU',
+        p_import_mode      => 'REPLACE_ALL',
+        p_user             => 'MANUAL_LOAD'
+    );
+    COMMIT;
+END;
+/
 ```
 
-Expected result:
+Example — incremental update:
 
-| ENTITY_NAME | SOURCE_TABLE | STATUS | LAST_WATERMARK |
-|---|---|---|---|
-| STAFFING_SCHEDULE | KBR_IHUB.APAC_PCDM_STAFFING_SCHEDULE_IHUB | IDLE | *(null — first run will load all data)* |
-| COST | KBR_IHUB.APAC_PCDM_COST_IHUB | IDLE | *(null)* |
+```sql
+BEGIN
+    GPC_DM.PKG_STAFFING_LOAD.load(
+        p_portfolio_id     => 'GPC-001',
+        p_reporting_date   => DATE '2025-03-31',
+        p_execution_center => 'AU',
+        p_import_mode      => 'ADD_UPDATE',
+        p_user             => 'IICS_DAILY'
+    );
+    COMMIT;
+END;
+/
+```
+
+**What the package does internally:**
+
+1. GCS pre-process — stages distinct GCS combinations with `STAFFING_FLAG=1`, calls `PRC_MERGE_GLOBAL_CODING_STRUCTURE`, obtains `GCS_KEY`
+2. Invalidates `DIM_STAFFING_SCHEDULE` rows in scope (`IS_VALID = 0`)
+3. Inserts current `DIM_STAFFING_SCHEDULE` rows with `IS_VALID = 1`
+4. Invalidates `DIM_STAFFING_TIMELINE` rows in scope
+5. Inserts period rows into `DIM_STAFFING_TIMELINE` (one row per calendar month, unpivoted via CONNECT BY)
 
 ---
 
-## Step 4 — Run the Initial Load
+## Step 4 — Run a COST Load (manual)
 
-Run both entities together:
+`PKG_COST_LOAD.load` takes three parameters:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `p_portfolio_id` | VARCHAR2 | Portfolio identifier |
+| `p_reporting_date` | DATE | Reporting cut-off date |
+| `p_user` | VARCHAR2 | Calling user / system identifier for audit |
+
+Example:
 
 ```sql
-EXEC GPC_DM.PKG_ETL_ORCHESTRATOR.run_all;
+BEGIN
+    GPC_DM.PKG_COST_LOAD.load(
+        p_portfolio_id   => 'GPC-001',
+        p_reporting_date => DATE '2025-03-31',
+        p_user           => 'MANUAL_LOAD'
+    );
+    COMMIT;
+END;
+/
 ```
 
-Or run them individually:
+**What the package does internally:**
 
-```sql
-EXEC GPC_DM.PKG_ETL_ORCHESTRATOR.run_entity('STAFFING_SCHEDULE');
-EXEC GPC_DM.PKG_ETL_ORCHESTRATOR.run_entity('COST');
-```
-
-The first run has a `NULL` watermark — it loads the full history from the source tables.
+1. GCS pre-process — stages distinct GCS combinations with `COST_FLAG=1`, calls `PRC_MERGE_GLOBAL_CODING_STRUCTURE`, obtains `GCS_KEY`
+2. Invalidates all `DIM_COST` rows for this portfolio + reporting date (full load)
+3. Inserts pivoted COST CLASS rows — 11 blocks via UNION ALL (5 COMPANY rows + 6 CLIENT rows per source record)
 
 ---
 
 ## Step 5 — Verify Results
 
 ```sql
--- Run summary
-SELECT ENTITY_NAME, STATUS, ROWS_READ, ROWS_INSERTED, ROWS_REJECTED, START_TIME, END_TIME
+-- Latest run log entries
+SELECT ENTITY_NAME, STATUS, ROWS_INSERTED, ROWS_REJECTED, START_TIME, END_TIME
 FROM   GPC_DM.V_ETL_RUN_SUMMARY
-WHERE  ROWNUM <= 10;
+ORDER BY START_TIME DESC
+FETCH FIRST 10 ROWS ONLY;
 
--- Record counts in target tables
-SELECT 'DIM_STAFFING_SCHEDULE' AS tbl, COUNT(*) AS total, SUM(CASE WHEN IS_CURRENT='Y' THEN 1 END) AS current_rows FROM GPC_DM.DIM_STAFFING_SCHEDULE
+-- Active (valid) rows in target tables
+SELECT 'DIM_STAFFING_SCHEDULE' AS tbl,
+       COUNT(*)                  AS total_rows,
+       SUM(CASE WHEN IS_VALID = 1 THEN 1 END) AS valid_rows
+FROM   GPC_DM.DIM_STAFFING_SCHEDULE
 UNION ALL
-SELECT 'DIM_STAFFING_TIMELINE',        COUNT(*), NULL                                                                 FROM GPC_DM.DIM_STAFFING_TIMELINE
+SELECT 'DIM_STAFFING_TIMELINE',
+       COUNT(*), NULL
+FROM   GPC_DM.DIM_STAFFING_TIMELINE
 UNION ALL
-SELECT 'DIM_COST',                      COUNT(*), SUM(CASE WHEN IS_CURRENT='Y' THEN 1 END)                           FROM GPC_DM.DIM_COST
-UNION ALL
-SELECT 'DIM_TIMELINE_COST',             COUNT(*), NULL                                                                FROM GPC_DM.DIM_TIMELINE_COST;
+SELECT 'DIM_COST',
+       COUNT(*),
+       SUM(CASE WHEN IS_VALID = 1 THEN 1 END)
+FROM   GPC_DM.DIM_COST;
 
--- Any rejected rows?
-SELECT 'STAFFING' AS entity, COUNT(*) AS rejected FROM GPC_DM.STG_STAFFING_SCHEDULE WHERE STG_STATUS = 'REJECTED'
-UNION ALL
-SELECT 'STAFFING_TL',                             COUNT(*)             FROM GPC_DM.STG_STAFFING_TIMELINE  WHERE STG_STATUS = 'REJECTED'
-UNION ALL
-SELECT 'COST',                                    COUNT(*)             FROM GPC_DM.STG_COST               WHERE STG_STATUS = 'REJECTED'
-UNION ALL
-SELECT 'COST_TL',                                 COUNT(*)             FROM GPC_DM.STG_TIMELINE_COST      WHERE STG_STATUS = 'REJECTED';
+-- Any errors from today's runs?
+SELECT *
+FROM   GPC_DM.V_IICS_ERROR_SUMMARY
+WHERE  TRUNC(ERROR_TIME) = TRUNC(SYSDATE)
+ORDER BY ERROR_TIME DESC;
 ```
 
 ---
 
-## Step 6 — Schedule Daily Runs (Optional)
+## Step 6 — IICS-Triggered Loads
+
+When IICS orchestrates the loads, it calls the same packages with parameters passed in as taskflow variables.
+See `IICS/IICS_SETUP_GUIDE.md` for full taskflow configuration.
+
+Quick SQL validation after an IICS run:
 
 ```sql
-BEGIN
-    DBMS_SCHEDULER.CREATE_JOB(
-        job_name        => 'GPC_DM.ETL_DAILY_RUN',
-        job_type        => 'PLSQL_BLOCK',
-        job_action      => 'BEGIN GPC_DM.PKG_ETL_ORCHESTRATOR.run_all; END;',
-        start_date      => SYSTIMESTAMP,
-        repeat_interval => 'FREQ=DAILY;BYHOUR=2;BYMINUTE=0',
-        enabled         => TRUE,
-        comments        => 'Daily ETL load — STAFFING_SCHEDULE and COST'
-    );
-END;
-/
-```
+-- Confirm today's IICS run completed
+SELECT * FROM GPC_DM.V_IICS_RUN_SUMMARY ORDER BY RUN_ID DESC;
 
-Subsequent runs are incremental — only records where `REPORTING_DATE > LAST_WATERMARK` are processed.
+-- Check for errors
+SELECT * FROM GPC_DM.V_IICS_ERROR_SUMMARY ORDER BY ERROR_TIME DESC;
+```
 
 ---
 
 ## Troubleshooting
 
-**Entity stuck in RUNNING state** (e.g. session was killed):
-```sql
-UPDATE GPC_DM.ETL_CONTROL SET STATUS = 'IDLE'
-WHERE  ENTITY_ID = (SELECT ENTITY_ID FROM GPC_DM.ETL_ENTITY WHERE ENTITY_NAME = 'STAFFING_SCHEDULE');
-COMMIT;
-```
-
-**Check errors from the last run:**
+**Load raised an exception — check the error log:**
 ```sql
 SELECT ENTITY_NAME, ERROR_CODE, ERROR_MESSAGE, ERROR_TIME
 FROM   GPC_DM.ETL_ERROR_LOG
-WHERE  ERROR_TIME >= SYSDATE - 1
+WHERE  TRUNC(ERROR_TIME) = TRUNC(SYSDATE)
 ORDER BY ERROR_TIME DESC;
 ```
 
-**Inspect rejected rows with reasons:**
+**No rows appearing in target after load:**
 ```sql
-SELECT SCHEDULE_ID, STG_REJECT_REASON
-FROM   GPC_DM.STG_STAFFING_SCHEDULE
-WHERE  STG_STATUS = 'REJECTED'
-ORDER BY STG_ID DESC;
-
-SELECT COST_ID, STG_REJECT_REASON
-FROM   GPC_DM.STG_COST
-WHERE  STG_STATUS = 'REJECTED'
-ORDER BY STG_ID DESC;
+-- Check ETL_RUN_LOG for the run
+SELECT r.*, l.ENTITY_NAME
+FROM   GPC_DM.ETL_RUN_LOG r
+JOIN   GPC_DM.ETL_ENTITY  l ON l.ENTITY_ID = r.ENTITY_ID
+WHERE  TRUNC(r.START_TIME) = TRUNC(SYSDATE)
+ORDER BY r.RUN_ID DESC;
 ```
 
-**Force a full reload** (reset the watermark):
+**GCS key lookup returns zero rows:**
 ```sql
-UPDATE GPC_DM.ETL_CONTROL SET LAST_WATERMARK = NULL
-WHERE  ENTITY_ID IN (SELECT ENTITY_ID FROM GPC_DM.ETL_ENTITY WHERE ENTITY_NAME IN ('STAFFING_SCHEDULE','COST'));
-COMMIT;
+-- Verify GCS reference table has data
+SELECT COUNT(*) FROM GPC_DM.REF_GLOBAL_CODING_STRUCTURE;
+-- If 0, the GCS merge procedure did not complete. Check PRC_MERGE_GLOBAL_CODING_STRUCTURE.
+
+-- Verify staging table was populated
+SELECT COUNT(*) FROM GPC_DM.STG_GLOBAL_CODING_STRUCTURE;
+```
+
+**Check which rows are currently valid in a target table:**
+```sql
+SELECT COUNT(*) AS valid_rows, PORTFOLIO_ID
+FROM   GPC_DM.DIM_STAFFING_SCHEDULE
+WHERE  IS_VALID = 1
+GROUP BY PORTFOLIO_ID
+ORDER BY 2;
 ```
 
 ---
 
-## Source Table Column Mapping Summary
+## Source Table Column Reference
 
-### STAFFING_SCHEDULE
+### STAFFING — KBR_IHUB.APAC_PCDM_STAFFING_SCHEDULE_IHUB
 
-| Source Column | Target Column | Table | Role |
-|---|---|---|---|
-| `SCHEDULE_ID` | `SCHEDULE_ID` | DIM_STAFFING_SCHEDULE | Business key |
-| `EMPLOYEE_ID` | `EMPLOYEE_ID` | DIM_STAFFING_SCHEDULE | Tracked |
-| `POSITION_ID` | `POSITION_ID` | DIM_STAFFING_SCHEDULE | Tracked / Required |
-| `PROJECT_ID` | `PROJECT_ID` | DIM_STAFFING_SCHEDULE | Tracked / Required |
-| `SCHEDULE_TYPE` | `SCHEDULE_TYPE` | DIM_STAFFING_SCHEDULE | Tracked / Validated |
-| `SCHEDULE_STATUS` | `SCHEDULE_STATUS` | DIM_STAFFING_SCHEDULE | Tracked / Validated |
-| `SCHEDULE_START_DATE` | `SCHEDULE_START_DATE` | DIM_STAFFING_SCHEDULE | Tracked / Date order check |
-| `SCHEDULE_END_DATE` | `SCHEDULE_END_DATE` | DIM_STAFFING_SCHEDULE | Tracked / Date order check |
-| `SCHEDULE_ID` | `SCHEDULE_ID` | DIM_STAFFING_TIMELINE | Business key (composite) |
-| `PERIOD_START_DATE` | `PERIOD_START_DATE` → `DT_PERIOD` | DIM_STAFFING_TIMELINE | Derived YYYYMM period |
-| `ALLOCATED_HOURS` | `ALLOCATED_HOURS` | DIM_STAFFING_TIMELINE | Required / Non-negative |
+| Source Column | Used As | Notes |
+|---|---|---|
+| `PORTFOLIO_ID` | Filter key | Matches `p_portfolio_id` |
+| `REPORTING_DATE` | Filter key | Matches `p_reporting_date` |
+| `EMPLOYEE_ID` | Business key component | Composite SCD key |
+| `POSITION_NUMBER` | Business key component | Composite SCD key |
+| `EXECUTION_CENTER` | GCS dimension | First 2 chars used |
+| `BILL_TYPE` | GCS dimension | First 2 chars used |
+| `COST_TYPE` | Business column | First 5 chars used |
+| `CBS` | Business column | First 7 chars used |
+| `JOB_TITLE` | Business column | |
+| `GRADE_LEVEL` | Business column | |
+| `PROJECT_ROLE` | Business column | |
+| `WBS_CODE` | Business column | |
+| `HOURS_PER_WEEK` | Timeline source | Used for `PLAN_HOURS` and `FORECAST_HOURS` |
+| `PLAN_START_DATE` | Timeline bounds | Period rows generated from this date |
+| `PLAN_END_DATE` | Timeline bounds | |
+| `FORECAST_START_DATE` | Timeline bounds | |
+| `FORECAST_END_DATE` | Timeline bounds | |
+| `SCHEDULE_TYPE` | Business column | Set to NULL (not mapped) |
 
-### COST
+**Period unpivot logic:** One row per calendar month is generated via CROSS JOIN with a CONNECT BY numbers generator (up to 360 months). `PLAN_HOURS = HOURS_PER_WEEK` if the generated month falls within the plan date range; `FORECAST_HOURS = HOURS_PER_WEEK` if within the forecast range.
 
-| Source Column | Target Column | Table | Role |
-|---|---|---|---|
-| `COST_ID` | `COST_ID` | DIM_COST | Business key |
-| `PROJECT_ID` | `PROJECT_ID` | DIM_COST | Tracked / Required |
-| `COST_CENTER` | `COST_CENTER` | DIM_COST | Tracked |
-| `COST_TYPE` | `COST_TYPE` | DIM_COST | Tracked / Required |
-| `COST_CATEGORY` | `COST_CATEGORY` | DIM_COST | Tracked / Validated (COMPANY or CLIENT) |
-| `CURRENCY` | `CURRENCY` | DIM_COST | Tracked |
-| `BUDGET_VERSION` | `BUDGET_VERSION` | DIM_COST | Tracked |
-| `COST_ID` | `COST_ID` | DIM_TIMELINE_COST | Business key (composite) |
-| `PERIOD_DATE` | `PERIOD_DATE` → `DT_PERIOD` | DIM_TIMELINE_COST | Derived YYYYMM period |
-| `AMOUNT` | `AMOUNT` | DIM_TIMELINE_COST | Required |
-| `FORECAST_TYPE` | `FORECAST_TYPE` → `CURVE_TYPE` | DIM_TIMELINE_COST | Derived: ACTUAL/BUDGET/FORECAST |
+### COST — KBR_IHUB.APAC_PCDM_COST_IHUB
+
+| Source Column | Used As | Notes |
+|---|---|---|
+| `PORTFOLIO_ID` | Filter key | Matches `p_portfolio_id` |
+| `REPORTING_DATE` | Filter key | Matches `p_reporting_date` |
+| `EXECUTION_CENTER` | GCS dimension | Full value |
+| `BILL_TYPE` | GCS dimension | Full value |
+| `PROJECT_ID` | Business column | |
+| `WBS_CODE` | Business column | |
+| `COST_TYPE` | Business column | |
+| `CBS` | Business column | |
+| `FORECAST_TYPE` | `CURVE_TYPE` derivation | `ACTUAL` → ACTUAL; `FORECAST` → FORECAST; else → BUDGET |
+| `OB_COMPANY` | Pivoted to row | COST_CLASS = `OB COMPANY` |
+| `BUDGET_COMPANY` | Pivoted to row | COST_CLASS = `BUDGET` |
+| `EAC_COMPANY` | Pivoted to row | COST_CLASS = `EAC COMPANY` |
+| `FORECAST_COMPANY` | Pivoted to row | COST_CLASS = `FORECAST` |
+| `EARNED_VALUE_COMPANY` | Pivoted to row | COST_CLASS = `EARNED` |
+| `OB_CLIENT` | Pivoted to row | COST_CLASS = `OB CLIENT` |
+| `BUDGET_CLIENT` | Pivoted to row | COST_CLASS = `BUDGET CLIENT` |
+| `EAC_CLIENT` | Pivoted to row | COST_CLASS = `EAC CLIENT` |
+| `FORECAST_CLIENT` | Pivoted to row | COST_CLASS = `FORECAST CLIENT` |
+| `EARNED_VALUE_CLIENT` | Pivoted to row | COST_CLASS = `EARNED CLIENT` |
+| `ACTUAL_CLIENT` | Pivoted to row | COST_CLASS = `ACTUAL CLIENT` |
+
+**Pivot logic:** Each source row produces up to 11 `DIM_COST` rows — one per COST_CLASS value. `DATA_SOURCE = 'GENERIC LOAD'` is hardcoded on all rows.

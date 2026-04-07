@@ -1,25 +1,35 @@
 # IICS Setup Guide — GPC_DM ETL Daily Run
 
-How to deploy and configure the IICS job that orchestrates the EDWH ETL pipeline for STAFFING_SCHEDULE and COST.
+How to deploy and configure the IICS taskflow that triggers the EDWH ETL loads for STAFFING_SCHEDULE and COST.
 
 ---
 
 ## Overview
 
-IICS acts as the **scheduler and orchestrator** only. All data movement, transformation, validation, and loading happens inside Oracle via the GPC_DM PL/SQL packages. IICS calls two Oracle stored procedures and reads the Oracle log tables to confirm success or report errors.
+IICS acts as the **trigger and monitor** only. All data movement, transformation, and loading happens inside Oracle via dedicated PL/SQL packages. IICS passes parameters (portfolio, date, mode) to Oracle and reads the Oracle log views to confirm success or report errors.
 
 ```
-IICS Taskflow
+IICS Taskflow (TF_GPC_DM_ETL_DAILY_RUN)
     │
-    ├─ T1  Pre-check         → SELECT from ETL_CONTROL
-    ├─ T2  Run Staffing      → BEGIN PKG_ETL_ORCHESTRATOR.run_entity('STAFFING_SCHEDULE'); END;
-    ├─ T3  Run Cost          → BEGIN PKG_ETL_ORCHESTRATOR.run_entity('COST'); END;
+    ├─ T1  Pre-check         → Verify source tables accessible; no stuck runs for this scope
+    ├─ T2  Run Staffing      → BEGIN GPC_DM.PKG_STAFFING_LOAD.load(...); END;
+    ├─ T3  Run Cost          → BEGIN GPC_DM.PKG_COST_LOAD.load(...); END;
     ├─ T4  Capture Run Log   → SELECT from V_IICS_RUN_SUMMARY
     ├─ T5  Capture Errors    → SELECT from V_IICS_ERROR_SUMMARY
     ├─ T6  Decision          → error_count = 0 ?
     ├─ T7  Email Success     → run summary to team
     └─ T8  Email Failure     → error detail + diagnostic queries to team
 ```
+
+**Input parameters** (passed to the taskflow per execution):
+
+| Parameter | Example | Description |
+|---|---|---|
+| `$$v_portfolio_id` | `GPC-001` | Portfolio to process |
+| `$$v_reporting_date` | `2025-03-31` | Reporting date (YYYY-MM-DD) |
+| `$$v_execution_center` | `AU` | Execution centre code (STAFFING) |
+| `$$v_import_mode` | `REPLACE_ALL` | `REPLACE_ALL` or `ADD_UPDATE` (STAFFING) |
+| `$$v_user` | `IICS_DAILY` | Audit user label |
 
 ---
 
@@ -33,15 +43,14 @@ IICS/
 ├── taskflows/
 │   └── TF_GPC_DM_ETL_DAILY_RUN.xml ← main taskflow
 └── sql/
-    ├── 01_pre_check.sql             ← T1: verify entities are runnable
-    ├── 02_run_staffing_schedule.sql ← T2: call STAFFING_SCHEDULE procedure
-    ├── 03_run_cost.sql              ← T3: call COST procedure
+    ├── 01_pre_check.sql             ← T1: verify source access and no stuck runs
+    ├── 02_run_staffing_schedule.sql ← T2: call PKG_STAFFING_LOAD.load
+    ├── 03_run_cost.sql              ← T3: call PKG_COST_LOAD.load
     ├── 04_capture_run_log.sql       ← T4: read V_IICS_RUN_SUMMARY
     └── 05_capture_error_log.sql     ← T5: read V_IICS_ERROR_SUMMARY
 ```
 
-The Oracle views `V_IICS_RUN_SUMMARY` and `V_IICS_ERROR_SUMMARY` are defined in:
-`ddl/07_views.sql` — deployed as part of `00_install_all.sql`.
+Oracle views `V_IICS_RUN_SUMMARY` and `V_IICS_ERROR_SUMMARY` are defined in `ddl/07_views.sql` and deployed by `00_install_all.sql`.
 
 ---
 
@@ -50,11 +59,12 @@ The Oracle views `V_IICS_RUN_SUMMARY` and `V_IICS_ERROR_SUMMARY` are defined in:
 | Item | Requirement |
 |---|---|
 | Oracle Framework | `00_install_all.sql` fully deployed in GPC_DM |
+| Seed data | `data/16_metadata_inserts.sql` executed |
 | IICS version | Cloud Data Integration (CDI) — any current version |
 | Secure Agent | Installed in the same network zone as the Oracle DB |
 | Oracle JDBC driver | `ojdbc8.jar` or `ojdbc11.jar` on the Secure Agent |
-| Oracle privileges | GPC_DM user must have EXECUTE on all `PKG_ETL_*` packages and SELECT on all ETL log tables and IICS views |
-| Email relay | SMTP configured in IICS Administrator for email notifications |
+| Oracle privileges | GPC_DM user must have EXECUTE on `PKG_STAFFING_LOAD`, `PKG_COST_LOAD` and SELECT on all ETL log tables and IICS views |
+| Email relay | SMTP configured in IICS Administrator |
 
 ### Verify Oracle prerequisites
 
@@ -63,8 +73,11 @@ The Oracle views `V_IICS_RUN_SUMMARY` and `V_IICS_ERROR_SUMMARY` are defined in:
 SELECT OBJECT_NAME, OBJECT_TYPE, STATUS
 FROM   ALL_OBJECTS
 WHERE  OWNER = 'GPC_DM'
-AND    OBJECT_NAME IN ('PKG_ETL_ORCHESTRATOR','V_IICS_RUN_SUMMARY','V_IICS_ERROR_SUMMARY');
--- All 3 must show STATUS = VALID
+AND    OBJECT_NAME IN (
+    'PKG_STAFFING_LOAD', 'PKG_COST_LOAD',
+    'V_IICS_RUN_SUMMARY', 'V_IICS_ERROR_SUMMARY'
+);
+-- All 4 must show STATUS = VALID
 ```
 
 ---
@@ -99,7 +112,7 @@ AND    OBJECT_NAME IN ('PKG_ETL_ORCHESTRATOR','V_IICS_RUN_SUMMARY','V_IICS_ERROR
 
 **Test the connection** before proceeding — the Test button must return "Connection successful".
 
-Alternatively, import `connections/Oracle_GPC_DM_Connection.xml` via Administrator → Connections → Import (update the `{HOST}`, `{PORT}`, `{SERVICE_NAME}`, `{GPC_DM_PASSWORD}` placeholders first).
+Alternatively, import `connections/Oracle_GPC_DM_Connection.xml` and update the `{HOST}`, `{PORT}`, `{SERVICE_NAME}`, `{GPC_DM_PASSWORD}` placeholders.
 
 ---
 
@@ -108,10 +121,6 @@ Alternatively, import `connections/Oracle_GPC_DM_Connection.xml` via Administrat
 If not already deployed (run this once):
 
 ```sql
--- Run as GPC_DM or DBA
--- These views are included in ddl/07_views.sql and in 00_install_all.sql.
--- If the framework is already installed, run only these two CREATE OR REPLACE VIEW statements.
-
 @ddl/07_views.sql
 
 -- Verify:
@@ -139,12 +148,14 @@ Create the following tasks in order:
 #### T2 — SQL Task: T2_RUN_STAFFING
 - **Connection:** `Oracle_GPC_DM`
 - **SQL:** paste content of `sql/02_run_staffing_schedule.sql`
+- **Input parameters:** `$$v_portfolio_id`, `$$v_reporting_date`, `$$v_execution_center`, `$$v_import_mode`, `$$v_user`
 - **On Success:** go to T3
 - **On Failure:** go to T5_CAPTURE_ERRORS
 
 #### T3 — SQL Task: T3_RUN_COST
 - **Connection:** `Oracle_GPC_DM`
 - **SQL:** paste content of `sql/03_run_cost.sql`
+- **Input parameters:** `$$v_portfolio_id`, `$$v_reporting_date`, `$$v_user`
 - **On Success:** go to T4
 - **On Failure:** go to T5_CAPTURE_ERRORS
 
@@ -161,9 +172,7 @@ Create the following tasks in order:
 | `STAFFING_STATUS` | `$$v_staffing_status` | String |
 | `COST_STATUS` | `$$v_cost_status` | String |
 | `STAFFING_ROWS_INSERTED` | `$$v_staffing_rows_inserted` | Integer |
-| `STAFFING_ROWS_REJECTED` | `$$v_staffing_rows_rejected` | Integer |
 | `COST_ROWS_INSERTED` | `$$v_cost_rows_inserted` | Integer |
-| `COST_ROWS_REJECTED` | `$$v_cost_rows_rejected` | Integer |
 
 - **On Success / Failure:** both go to T5
 
@@ -187,13 +196,13 @@ Create the following tasks in order:
 
 #### T7 — Email Notification: T7_EMAIL_SUCCESS
 - **To:** `agron.daka@aralytiks.cm; dren.sahiti@aralytiks.cm; elion.rrahmani@aralytiks.cm`
-- **Subject:** `[GPC_DM ETL] SUCCESS — Daily Run $$v_run_date`
+- **Subject:** `[GPC_DM ETL] SUCCESS — $$v_portfolio_id / $$v_reporting_date`
 - **Body:** copy from the `<BODY>` block in `taskflows/TF_GPC_DM_ETL_DAILY_RUN.xml`
 - **On Success:** End (Success)
 
 #### T8 — Email Notification: T8_EMAIL_FAILURE
 - **To:** `agron.daka@aralytiks.cm; dren.sahiti@aralytiks.cm; elion.rrahmani@aralytiks.cm`
-- **Subject:** `[GPC_DM ETL] VALIDATION FAILURE — Daily Run $$v_run_date requires attention`
+- **Subject:** `[GPC_DM ETL] FAILURE — $$v_portfolio_id / $$v_reporting_date requires attention`
 - **Body:** copy from the `<BODY>` block in `taskflows/TF_GPC_DM_ETL_DAILY_RUN.xml`
 - **On Success:** End (Failed)
 
@@ -210,40 +219,51 @@ Create the following tasks in order:
 
 In the taskflow **Parameters/Variables** panel, declare these variables:
 
-| Variable | Type | Default |
-|---|---|---|
-| `$$v_run_date` | String | `` |
-| `$$v_staffing_run_id` | Integer | `0` |
-| `$$v_cost_run_id` | Integer | `0` |
-| `$$v_staffing_status` | String | `UNKNOWN` |
-| `$$v_cost_status` | String | `UNKNOWN` |
-| `$$v_staffing_rows_inserted` | Integer | `0` |
-| `$$v_staffing_rows_rejected` | Integer | `0` |
-| `$$v_cost_rows_inserted` | Integer | `0` |
-| `$$v_cost_rows_rejected` | Integer | `0` |
-| `$$v_error_count` | Integer | `0` |
-| `$$v_error_summary` | String | `` |
+| Variable | Type | Direction | Default |
+|---|---|---|---|
+| `$$v_portfolio_id` | String | Input | `` |
+| `$$v_reporting_date` | String | Input | `` |
+| `$$v_execution_center` | String | Input | `` |
+| `$$v_import_mode` | String | Input | `REPLACE_ALL` |
+| `$$v_user` | String | Input | `IICS` |
+| `$$v_blocked_count` | Integer | Local | `0` |
+| `$$v_run_date` | String | Local | `` |
+| `$$v_staffing_run_id` | Integer | Local | `0` |
+| `$$v_cost_run_id` | Integer | Local | `0` |
+| `$$v_staffing_status` | String | Local | `UNKNOWN` |
+| `$$v_cost_status` | String | Local | `UNKNOWN` |
+| `$$v_staffing_rows_inserted` | Integer | Local | `0` |
+| `$$v_cost_rows_inserted` | Integer | Local | `0` |
+| `$$v_error_count` | Integer | Local | `0` |
+| `$$v_error_summary` | String | Local | `` |
 
 ---
 
-## Step 6 — Schedule the Taskflow
+## Step 6 — Schedule / Trigger the Taskflow
+
+The taskflow is designed to be triggered **per portfolio per reporting date**, either:
+
+- **On-demand** — triggered by the application or data team when a new file upload is ready
+- **Scheduled** — run via IICS Scheduler after the source table refresh window:
 
 **IICS Designer → Taskflow → Schedule tab**
 
 | Setting | Value |
 |---|---|
-| Frequency | Daily |
-| Start time | 02:00 UTC (adjust to run after source table refresh completes) |
+| Frequency | Daily (or as needed) |
+| Start time | 02:00 UTC (after source table refresh) |
 | Time zone | UTC |
 | Enabled | Yes |
+
+When scheduling, configure default values for the input parameters (or trigger via API with parameter overrides per run).
 
 ---
 
 ## Step 7 — Test Run
 
 1. In IICS Designer, open `TF_GPC_DM_ETL_DAILY_RUN`.
-2. Click **Run Now** (ad-hoc execution).
-3. Monitor the job in **Monitor → My Jobs**.
+2. Click **Run Now** → provide input parameter values.
+3. Monitor in **Monitor → My Jobs**.
 4. After completion, verify in Oracle:
 
 ```sql
@@ -253,14 +273,14 @@ SELECT * FROM GPC_DM.V_IICS_RUN_SUMMARY ORDER BY RUN_ID DESC;
 -- Check for errors
 SELECT * FROM GPC_DM.V_IICS_ERROR_SUMMARY ORDER BY ERROR_TIME DESC;
 
--- Confirm target table row counts
-SELECT 'DIM_STAFFING_SCHEDULE' AS tbl, COUNT(*) FROM GPC_DM.DIM_STAFFING_SCHEDULE WHERE IS_CURRENT = 'Y'
+-- Confirm valid rows loaded
+SELECT 'DIM_STAFFING_SCHEDULE' AS tbl,
+       COUNT(*) AS total, SUM(CASE WHEN IS_VALID=1 THEN 1 END) AS valid
+FROM   GPC_DM.DIM_STAFFING_SCHEDULE
 UNION ALL
-SELECT 'DIM_STAFFING_TIMELINE',          COUNT(*) FROM GPC_DM.DIM_STAFFING_TIMELINE
+SELECT 'DIM_STAFFING_TIMELINE', COUNT(*), NULL FROM GPC_DM.DIM_STAFFING_TIMELINE
 UNION ALL
-SELECT 'DIM_COST',                        COUNT(*) FROM GPC_DM.DIM_COST WHERE IS_CURRENT = 'Y'
-UNION ALL
-SELECT 'DIM_TIMELINE_COST',              COUNT(*) FROM GPC_DM.DIM_TIMELINE_COST;
+SELECT 'DIM_COST', COUNT(*), SUM(CASE WHEN IS_VALID=1 THEN 1 END) FROM GPC_DM.DIM_COST;
 ```
 
 ---
@@ -269,11 +289,11 @@ SELECT 'DIM_TIMELINE_COST',              COUNT(*) FROM GPC_DM.DIM_TIMELINE_COST;
 
 | Scenario | What happens in IICS | What happens in Oracle |
 |---|---|---|
-| Entity in RUNNING/DISABLED state | T1 returns BLOCKED_COUNT > 0 → routes to T8 failure email | Nothing called |
-| Oracle procedure raises exception (FAIL rule, metadata error) | IICS catches ORA- error, marks T2 or T3 as FAILED, routes to T5 then T8 | Run logged as FAILED in ETL_RUN_LOG; error written to ETL_ERROR_LOG |
-| Rows rejected by validation (REJECT rules) | Procedure completes successfully; IICS marks T2/T3 as SUCCESS | Rejected rows stay in staging with STG_STATUS=REJECTED; count in ROWS_REJECTED |
-| T5 reads errors > 0 after successful procedure call | Routes to T8 failure email even though procedures succeeded | Data is loaded; rejected rows are flagged |
-| All clean | Routes to T7 success email | Watermark advanced; target tables updated |
+| Source table not accessible (T1 fails) | Routes to T8 failure email | Nothing called |
+| Oracle procedure raises exception | IICS catches ORA- error, marks T2 or T3 FAILED, routes to T5 then T8 | Run logged as FAILED in ETL_RUN_LOG; error written to ETL_ERROR_LOG; ROLLBACK issued |
+| GCS merge step fails | Same as above — package rolls back and raises | STG_GLOBAL_CODING_STRUCTURE left in pre-merge state |
+| No matching source rows for portfolio/date | Procedure completes normally; ROWS_INSERTED = 0 | Target rows for that scope invalidated; zero new rows inserted |
+| All clean | Routes to T7 success email | IS_VALID rows updated; new rows inserted in target tables |
 
 ---
 
@@ -285,5 +305,5 @@ SELECT 'DIM_TIMELINE_COST',              COUNT(*) FROM GPC_DM.DIM_TIMELINE_COST;
 | IICS Monitor → My Jobs → task detail | IICS-level error messages (connection failures, timeout) |
 | `GPC_DM.V_IICS_RUN_SUMMARY` | Oracle-side run status, row counts per entity |
 | `GPC_DM.V_IICS_ERROR_SUMMARY` | Validation and load errors with full messages |
-| `GPC_DM.ETL_STEP_LOG` | Step-by-step timing (TRANSFORM, CLASSIFY, EXPIRE, INSERT, MERGE) |
+| `GPC_DM.ETL_STEP_LOG` | Step-by-step timing (GCS, INVALIDATE, INSERT) |
 | Email inbox | Success/failure notification with embedded diagnostic queries |
