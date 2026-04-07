@@ -111,6 +111,16 @@ PROMPT =============================================================
 @@data/16_metadata_inserts.sql
 
 PROMPT =============================================================
+PROMPT  STEP 16b — PKG_STAFFING_LOAD
+PROMPT =============================================================
+@@packages/16_pkg_staffing_load.sql
+
+PROMPT =============================================================
+PROMPT  STEP 16c — PKG_COST_LOAD
+PROMPT =============================================================
+@@packages/17_pkg_cost_load.sql
+
+PROMPT =============================================================
 PROMPT  Installation complete.
 PROMPT  Verify with:
 PROMPT    SELECT * FROM GPC_DM.V_ETL_ACTIVE_ENTITIES;
